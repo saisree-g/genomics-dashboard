@@ -334,9 +334,7 @@ def tab_train(cfg: dict) -> None:
             )
 
         with st.expander("🏗 Model architecture"):
-            lines: list[str] = []
-            model.summary(print_fn=lambda x: lines.append(x))
-            st.code("\n".join(lines), language=None)
+            st.code(str(model), language=None)
 
         st.markdown("**Training progress**")
         progress_bar = st.progress(0.0)
