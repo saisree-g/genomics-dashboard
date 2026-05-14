@@ -3,8 +3,11 @@ venv/
 .venv/
 env/
 
-# Data files (too large for GitHub — download separately)
-data/
+# Full FASTA files (too large for GitHub)
+data/*.fasta
+
+# Keep the small sample dataset
+!data/sample.csv
 
 # Python cache
 __pycache__/

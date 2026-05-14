@@ -1,74 +1,95 @@
 """
-api.py — Load genomic sequences from local FASTA files.
+api.py — Load genomic sequences from local FASTA files or sample.csv fallback.
 
-Data files (in data/ folder):
-    cds.fasta   → 123,410 human coding sequences
-    lnc.fasta   → 17,012  human lncRNA sequences
-    psd.fasta   → 7,868   human pseudogene sequences
+Local development  → reads cds.fasta / lnc.fasta / psd.fasta (full datasets)
+Streamlit Cloud    → reads data/sample.csv (500 pre-cleaned sequences/class,
+                     committed to the repo)
 
-fetch_coding_sequences()     → list[str]
-fetch_lncrna_sequences()     → list[str]
-fetch_pseudogene_sequences() → list[str]
-fetch_all()                  → dict[str, list[str]]
+fetch_all()  → dict[str, list[str]], dict[str, dict]
 """
 
 import random
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 from Bio import SeqIO
 
 from preprocess import preprocess_pool
 
-# ── FILE PATHS ────────────────────────────────────────────────────────────────
 _DATA_DIR = Path(__file__).parent / "data"
-_FILES = {
+_FASTA_FILES = {
     "Coding":     _DATA_DIR / "cds.fasta",
     "lncRNA":     _DATA_DIR / "lnc.fasta",
     "Pseudogene": _DATA_DIR / "psd.fasta",
 }
+_SAMPLE_CSV = _DATA_DIR / "sample.csv"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LOADERS
+# ─────────────────────────────────────────────────────────────────────────────
+
+@st.cache_data(ttl=None, show_spinner=False)
+def _load_from_fasta(class_name: str, seq_length: int) -> tuple[list[str], dict]:
+    """Full FASTA load + preprocessing pipeline. Used when local files exist."""
+    path = _FASTA_FILES[class_name]
+    raw  = [str(r.seq) for r in SeqIO.parse(str(path), "fasta")]
+    return preprocess_pool(raw, seq_length)
 
 
 @st.cache_data(ttl=None, show_spinner=False)
-def _load_fasta(class_name: str, seq_length: int) -> tuple[list[str], dict]:
+def _load_from_csv(seq_length: int) -> dict[str, list[str]]:
     """
-    Read FASTA file → run full preprocessing pipeline → return clean sequences.
-    Cached permanently since data files don't change between runs.
+    Load pre-cleaned sample.csv. Used on Streamlit Cloud where FASTA
+    files are not present. Truncates/pads sequences to seq_length.
     """
-    path = _FILES[class_name]
-    if not path.exists():
-        st.error(f"File not found: {path}")
-        return [], {}
+    if not _SAMPLE_CSV.exists():
+        st.error(
+            "Neither FASTA files nor sample.csv found. "
+            "Run `python create_sample.py` locally and commit data/sample.csv."
+        )
+        return {"Coding": [], "lncRNA": [], "Pseudogene": []}
 
-    raw = [str(r.seq) for r in SeqIO.parse(str(path), "fasta")]
-    sequences, report = preprocess_pool(raw, seq_length)
-    return sequences, report
-
-
-# ── PUBLIC FETCH FUNCTIONS ────────────────────────────────────────────────────
-
-def fetch_coding_sequences(n: int = 500, seq_length: int = 1000) -> tuple[list[str], dict]:
-    pool, report = _load_fasta("Coding", seq_length)
-    return random.sample(pool, min(n, len(pool))), report
-
-
-def fetch_lncrna_sequences(n: int = 500, seq_length: int = 1000) -> tuple[list[str], dict]:
-    pool, report = _load_fasta("lncRNA", seq_length)
-    return random.sample(pool, min(n, len(pool))), report
+    df = pd.read_csv(_SAMPLE_CSV)
+    result = {}
+    for cls in ["Coding", "lncRNA", "Pseudogene"]:
+        seqs = df[df["class"] == cls]["sequence"].tolist()
+        # Truncate to requested seq_length
+        result[cls] = [s[:seq_length] for s in seqs if len(s) >= seq_length]
+    return result
 
 
-def fetch_pseudogene_sequences(n: int = 500, seq_length: int = 1000) -> tuple[list[str], dict]:
-    pool, report = _load_fasta("Pseudogene", seq_length)
-    return random.sample(pool, min(n, len(pool))), report
+def _fasta_available() -> bool:
+    return all(p.exists() for p in _FASTA_FILES.values())
 
 
-def fetch_all(n_per_class: int, seq_length: int) -> tuple[dict[str, list[str]], dict]:
-    """Return sequences + preprocessing reports for all three classes."""
-    seqs, reports = {}, {}
-    for cls, fn in [
-        ("Coding",     fetch_coding_sequences),
-        ("lncRNA",     fetch_lncrna_sequences),
-        ("Pseudogene", fetch_pseudogene_sequences),
-    ]:
-        seqs[cls], reports[cls] = fn(n_per_class, seq_length)
+# ─────────────────────────────────────────────────────────────────────────────
+# PUBLIC API
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fetch_all(
+    n_per_class: int, seq_length: int
+) -> tuple[dict[str, list[str]], dict[str, dict]]:
+    """
+    Return (sequences_dict, preprocessing_reports).
+    Automatically uses FASTA files locally or sample.csv on Streamlit Cloud.
+    """
+    if _fasta_available():
+        seqs, reports = {}, {}
+        for cls in ["Coding", "lncRNA", "Pseudogene"]:
+            pool, report = _load_from_fasta(cls, seq_length)
+            seqs[cls]    = random.sample(pool, min(n_per_class, len(pool)))
+            reports[cls] = report
+        return seqs, reports
+
+    # Fallback: sample.csv
+    st.info("Local FASTA files not found — loading from pre-built sample dataset.")
+    pool    = _load_from_csv(seq_length)
+    seqs    = {cls: random.sample(s, min(n_per_class, len(s))) for cls, s in pool.items()}
+    reports = {
+        cls: {"raw": len(pool[cls]), "final": len(seqs[cls]),
+              "dropped_low_quality": 0, "dropped_duplicates": 0}
+        for cls in seqs
+    }
     return seqs, reports
